@@ -1,0 +1,124 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: actionlint
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This repository is nothing but workflow YAML, so a linter that
+          # understands Actions expressions and shell blocks is the test.
+          # Pinned by digest (actionlint 1.7.7): a floating tag would let the
+          # check change under us without a commit.
+          docker run --rm \
+            -v "$PWD:/repo" -w /repo \
+            rhysd/actionlint@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
+            -color
+
+      - name: The reusable workflows declare what the README documents
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import yaml, sys
+
+          expected = {
+              ".github/workflows/release.yml": (
+                  {"moonlit-version", "runs-on", "config", "stage", "working-directory"},
+                  {"contents": "write"},
+              ),
+              ".github/workflows/validate.yml": (
+                  {"moonlit-version", "runs-on", "config", "working-directory"},
+                  {"contents": "read"},
+              ),
+          }
+
+          failed = False
+          for path, (inputs, perms) in expected.items():
+              d = yaml.safe_load(open(path))
+              # PyYAML parses the `on:` key as the boolean True.
+              trigger = d.get(True, d.get("on"))
+              if "workflow_call" not in trigger:
+                  print(f"{path}: not callable — no workflow_call trigger")
+                  failed = True
+                  continue
+              got = set(trigger["workflow_call"]["inputs"])
+              if got != inputs:
+                  print(f"{path}: inputs {sorted(got)} != documented {sorted(inputs)}")
+                  failed = True
+              if d.get("permissions") != perms:
+                  print(f"{path}: permissions {d.get('permissions')} != {perms}")
+                  failed = True
+
+          sys.exit(1 if failed else 0)
+          PY
+
+  release:
+    name: release
+    # Only main, only a real push, and only once lint is green. Gating inside
+    # this workflow rather than from a tag-triggered one is deliberate: a
+    # separate workflow would start concurrently with CI on the same push, and
+    # `needs:` cannot reach across workflows.
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    needs: [lint]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Install Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "22"
+
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          npx --yes
+          -p semantic-release@24
+          -p conventional-changelog-conventionalcommits@9
+          -p @semantic-release/exec@7
+          semantic-release
+
+      - name: Point the major tag at this release
+        # The move happens here, in the same job, rather than in a workflow
+        # listening for the tag push: GitHub suppresses workflow triggers for
+        # tags pushed with GITHUB_TOKEN, so such a listener would never fire
+        # and the major tag would silently go stale.
+        if: env.RELEASED_VERSION != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag="v${RELEASED_VERSION}"
+          if [[ ! "$tag" =~ ^v([0-9]+)\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::unexpected release tag '${tag}'"
+            exit 1
+          fi
+          major="v${BASH_REMATCH[1]}"
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --tags --force origin
+          git tag -f "$major" "$tag"
+          git push -f origin "refs/tags/${major}"
+
+          echo "moonlit-workflows: ${major} now points at ${tag}"

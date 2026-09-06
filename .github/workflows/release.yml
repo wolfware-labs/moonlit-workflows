@@ -1,0 +1,94 @@
+name: Moonlit release
+
+# Reusable workflow. Call it from your own repository:
+#
+#   jobs:
+#     release:
+#       uses: wolfware-labs/moonlit-workflows/.github/workflows/release.yml@v1
+#       secrets: inherit
+#
+# It owns the parts that are easy to get wrong — full git history, the right
+# permissions, and the environment the pipeline reads — so callers do not have
+# to rediscover them.
+
+on:
+  workflow_call:
+    inputs:
+      moonlit-version:
+        description: 'Moonlit version to install: "latest" or an exact version such as "1.2.0".'
+        type: string
+        required: false
+        default: latest
+      runs-on:
+        description: 'Runner label for the release job.'
+        type: string
+        required: false
+        default: ubuntu-latest
+      config:
+        description: 'Pipeline file to run. Empty uses the CLI default (release.yml / release.yaml).'
+        type: string
+        required: false
+        default: ''
+      stage:
+        description: 'Comma-separated stages to run. Empty runs every stage.'
+        type: string
+        required: false
+        default: ''
+      working-directory:
+        description: 'Directory to run the pipeline from. Empty uses the repository root.'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: release
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Moonlit reads commit history to decide the next version. A shallow
+          # clone silently produces the wrong answer rather than failing, which
+          # is why this is not left to the caller.
+          fetch-depth: 0
+
+      - uses: wolfware-labs/setup-moonlit@v1
+        with:
+          version: ${{ inputs.moonlit-version }}
+
+      - name: Run the pipeline
+        shell: bash
+        env:
+          # A reusable workflow cannot forward secrets it does not name: the
+          # caller's `secrets: inherit` makes them readable here, but each one
+          # still has to be mapped into the environment explicitly. A secret the
+          # caller has not defined resolves to an empty string, so listing more
+          # names than a given repository uses is harmless.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DOCKER_USER: ${{ secrets.DOCKER_USER }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          MOONLIT_TOKEN: ${{ secrets.MOONLIT_TOKEN }}
+          INPUT_CONFIG: ${{ inputs.config }}
+          INPUT_STAGE: ${{ inputs.stage }}
+          INPUT_WORKDIR: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+
+          args=()
+          if [[ -n "$INPUT_CONFIG" ]]; then args+=(--file "$INPUT_CONFIG"); fi
+          if [[ -n "$INPUT_STAGE" ]]; then args+=(--stage "$INPUT_STAGE"); fi
+          if [[ -n "$INPUT_WORKDIR" ]]; then args+=(--working-dir "$INPUT_WORKDIR"); fi
+
+          # The empty case is spelled out rather than relying on "${args[@]}":
+          # bash before 4.4 treats an empty array as unset under `set -u`, and
+          # GitHub's macOS runners still ship bash 3.2, which `runs-on` lets a
+          # caller select.
+          if [[ ${#args[@]} -gt 0 ]]; then
+            moonlit run "${args[@]}"
+          else
+            moonlit run
+          fi

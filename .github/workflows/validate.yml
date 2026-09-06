@@ -1,0 +1,72 @@
+name: Validate Moonlit pipeline
+
+# Reusable workflow. Call it from your own repository:
+#
+#   jobs:
+#     validate:
+#       uses: wolfware-labs/moonlit-workflows/.github/workflows/validate.yml@v1
+#
+# No secrets are needed unless the pipeline resolves plugins from a private
+# registry, in which case pass `secrets: inherit` and set MOONLIT_TOKEN.
+
+on:
+  workflow_call:
+    inputs:
+      moonlit-version:
+        description: 'Moonlit version to install: "latest" or an exact version such as "1.2.0".'
+        type: string
+        required: false
+        default: latest
+      runs-on:
+        description: 'Runner label for the validate job.'
+        type: string
+        required: false
+        default: ubuntu-latest
+      config:
+        description: 'Pipeline file to validate. Empty uses the CLI default (release.yml / release.yaml).'
+        type: string
+        required: false
+        default: ''
+      working-directory:
+        description: 'Directory to validate from. Empty uses the repository root.'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: validate
+    runs-on: ${{ inputs.runs-on }}
+    steps:
+      # No fetch-depth here: validation parses the pipeline and resolves
+      # plugins, and reads no commit history.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: wolfware-labs/setup-moonlit@v1
+        with:
+          version: ${{ inputs.moonlit-version }}
+
+      - name: Validate the pipeline
+        shell: bash
+        env:
+          MOONLIT_TOKEN: ${{ secrets.MOONLIT_TOKEN }}
+          INPUT_CONFIG: ${{ inputs.config }}
+          INPUT_WORKDIR: ${{ inputs.working-directory }}
+        run: |
+          set -euo pipefail
+
+          args=()
+          if [[ -n "$INPUT_CONFIG" ]]; then args+=(--file "$INPUT_CONFIG"); fi
+          if [[ -n "$INPUT_WORKDIR" ]]; then args+=(--working-dir "$INPUT_WORKDIR"); fi
+
+          # Spelled out rather than "${args[@]}": bash before 4.4 treats an
+          # empty array as unset under `set -u`, and GitHub's macOS runners
+          # still ship bash 3.2.
+          if [[ ${#args[@]} -gt 0 ]]; then
+            moonlit validate "${args[@]}"
+          else
+            moonlit validate
+          fi
